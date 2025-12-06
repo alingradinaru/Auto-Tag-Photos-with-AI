@@ -1,0 +1,5 @@
+{
+  "name": "InstaTag AI",
+  "description": "A powerful AI-driven tool to automatically generate titles, descriptions, and keywords for your photos using Google Gemini Vision.",
+  "requestFramePermissions": []
+}
