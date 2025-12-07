@@ -22,8 +22,98 @@ const toUCS2 = (str: string): number[] => {
   return res;
 };
 
+// Helper for UserComment (ASCII with prefix)
+const toUserComment = (str: string): number[] => {
+    // "ASCII\0\0\0" header followed by string bytes
+    const res = [65, 83, 67, 73, 73, 0, 0, 0]; 
+    for (let i = 0; i < str.length; i++) {
+        res.push(str.charCodeAt(i) & 0xFF);
+    }
+    return res;
+};
+
+const escapeXml = (unsafe: string): string => {
+  return unsafe.replace(/[<>&'"]/g, (c) => {
+    switch (c) {
+      case '<': return '&lt;';
+      case '>': return '&gt;';
+      case '&': return '&amp;';
+      case '\'': return '&apos;';
+      case '"': return '&quot;';
+    }
+    return c;
+  });
+};
+
+const createXmpPacket = (title: string, description: string, keywords: string[], category?: string) => {
+  const safeTitle = escapeXml(title);
+  const safeDesc = escapeXml(description);
+  const safeCategory = category ? escapeXml(category) : '';
+  const keywordsXml = keywords.map(k => `<rdf:li>${escapeXml(k)}</rdf:li>`).join('');
+
+  // Minimal XMP Packet with Dublin Core schema
+  return `<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 5.6-c140 79.160451, 2017/05/06-01:08:21        ">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/">
+   <dc:title>
+    <rdf:Alt>
+     <rdf:li xml:lang="x-default">${safeTitle}</rdf:li>
+    </rdf:Alt>
+   </dc:title>
+   <dc:description>
+    <rdf:Alt>
+     <rdf:li xml:lang="x-default">${safeDesc}</rdf:li>
+    </rdf:Alt>
+   </dc:description>
+   <dc:subject>
+    <rdf:Bag>
+     ${keywordsXml}
+    </rdf:Bag>
+   </dc:subject>
+   ${safeCategory ? `<photoshop:Category>${safeCategory}</photoshop:Category>` : ''}
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>`;
+};
+
+// Function to inject APP1 XMP segment into JPEG binary string
+const insertXmp = (binaryStr: string, xmpXml: string): string => {
+    const xmpHeader = "http://ns.adobe.com/xap/1.0/\0";
+    const xmpPayload = xmpHeader + xmpXml;
+    
+    // Construct segment: FF E1 + Length (2 bytes) + Payload
+    const length = 2 + xmpPayload.length;
+    const lengthBytes = String.fromCharCode((length >> 8) & 0xFF, length & 0xFF);
+    const segment = "\xFF\xE1" + lengthBytes + xmpPayload;
+
+    // Find insertion point (After SOI, and preferably after existing APP0/APP1)
+    // Simple approach: Scan for SOI (FF D8) and skip recognized headers (FF E0, FF E1)
+    let offset = 2; // Start after FF D8
+    
+    while (offset < binaryStr.length) {
+        if (binaryStr.charCodeAt(offset) === 0xFF) {
+            const marker = binaryStr.charCodeAt(offset + 1);
+            // Skip JFIF (E0) and Exif (E1) to insert XMP after them
+            if (marker === 0xE0 || marker === 0xE1) {
+                const len1 = binaryStr.charCodeAt(offset + 2);
+                const len2 = binaryStr.charCodeAt(offset + 3);
+                const len = (len1 << 8) | len2;
+                offset += 2 + len;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    
+    return binaryStr.slice(0, offset) + segment + binaryStr.slice(offset);
+};
+
 // Helper to construct filename with category suffix
-const constructFileName = (photo: PhotoItem, keepOriginal: boolean): string => {
+export const constructFileName = (photo: PhotoItem, keepOriginal: boolean): string => {
   if (!photo.data) return photo.file.name;
 
   const extension = photo.file.name.split('.').pop() || 'jpg';
@@ -59,44 +149,48 @@ export const embedMetadata = async (
     }
     
     const piexif = window.piexif;
-
-    // 0th IFD (Image File Directory)
-    // ImageDescription - 0x010E (Standard)
-    // XPTitle - 0x9C9B (Windows)
-    // XPComment - 0x9C9C (Windows - often used for description)
-    // XPKeywords - 0x9C9D (Windows)
-    
-    // Clean base64 string if it contains data URI prefix
-    const cleanBase64 = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
-
-    // Access ImageIFD constants from the loaded module
     const ImageIFD = piexif.ImageIFD;
+    const ExifIFD = piexif.ExifIFD;
 
+    // Clean base64 string
+    const cleanBase64 = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
+    
     // Append category to keywords for embedding if it exists
     const finalKeywords = category ? [...keywords, category] : keywords;
 
+    // 1. Prepare EXIF Data
     const exifObj = {
       "0th": {
-        [ImageIFD.ImageDescription]: description,
-        [ImageIFD.XPTitle]: toUCS2(title),
-        [ImageIFD.XPComment]: toUCS2(description),
-        [ImageIFD.XPKeywords]: toUCS2(finalKeywords.join(';')),
-        [ImageIFD.Software]: "InstaTag AI"
+        [ImageIFD.ImageDescription]: description, // Standard Description
+        [ImageIFD.XPTitle]: toUCS2(title),        // Windows Title
+        [ImageIFD.XPComment]: toUCS2(description), // Windows Comment
+        [ImageIFD.XPKeywords]: toUCS2(finalKeywords.join(';')), // Windows Tags
+        [0x9C9F]: toUCS2(description),            // Windows Subject
+        [ImageIFD.Software]: "Photagg AI"
       },
-      "Exif": {},
+      "Exif": {
+        [ExifIFD.UserComment]: toUserComment(description) // Standard Exif Comment
+      },
       "GPS": {},
       "1st": {},
       "thumbnail": null
     };
 
+    // 2. Insert EXIF
     const exifBytes = piexif.dump(exifObj);
-    const newBase64 = piexif.insert(exifBytes, "data:image/jpeg;base64," + cleanBase64);
+    const exifModifiedBase64 = piexif.insert(exifBytes, "data:image/jpeg;base64," + cleanBase64);
+    
+    // 3. Insert XMP
+    // We need to work with the binary string of the Exif-modified file
+    const binaryStr = atob(exifModifiedBase64.split(',')[1]);
+    const xmpXml = createXmpPacket(title, description, finalKeywords, category);
+    const finalBinary = insertXmp(binaryStr, xmpXml);
     
     // Return just the base64 data part
-    return newBase64.split(',')[1];
+    return btoa(finalBinary);
+
   } catch (error) {
     console.error("Error embedding metadata:", error);
-    // If embedding fails (e.g. not a JPEG), return original
     return base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
   }
 };
@@ -105,21 +199,18 @@ export const createZipWithMetadata = async (
   photos: PhotoItem[], 
   keepOriginalFilenames: boolean
 ): Promise<Blob> => {
-  // Check if JSZip is loaded
   if (!window.JSZip) {
     throw new Error("JSZip library not loaded");
   }
 
   const JSZip = window.JSZip;
   const zip = new JSZip();
-  const folder = zip.folder("instatag_photos");
+  const folder = zip.folder("photagg_photos");
 
   for (const photo of photos) {
     if (photo.data) {
-      // Get fresh base64
       let base64 = await fileToBase64(photo.file);
       
-      // If it's a JPEG, embed metadata
       if (photo.file.type === 'image/jpeg' || photo.file.type === 'image/jpg') {
         base64 = await embedMetadata(
           base64, 
@@ -128,8 +219,6 @@ export const createZipWithMetadata = async (
           photo.data.keywords,
           photo.data.category
         );
-      } else {
-        console.warn(`Skipping metadata embedding for non-JPEG file: ${photo.file.name}`);
       }
 
       const fileName = constructFileName(photo, keepOriginalFilenames);
@@ -148,7 +237,6 @@ export const processAndDownloadSingleImage = async (
 
   let base64 = await fileToBase64(photo.file);
   
-  // If it's a JPEG, embed metadata
   if (photo.file.type === 'image/jpeg' || photo.file.type === 'image/jpg') {
     base64 = await embedMetadata(
       base64, 
@@ -191,7 +279,6 @@ export const upscaleImage = (file: File, scale: number, customWidth?: number): P
       canvas.height = height;
       const ctx = canvas.getContext('2d');
       if (ctx) {
-        // High quality scaling settings
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(img, 0, 0, width, height);
@@ -203,7 +290,7 @@ export const upscaleImage = (file: File, scale: number, customWidth?: number): P
           } else {
              reject(new Error("Canvas to Blob failed"));
           }
-        }, file.type, 0.92); // 92% quality for standard output
+        }, file.type, 0.92);
       } else {
         reject(new Error("Canvas context failed"));
       }

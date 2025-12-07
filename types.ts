@@ -24,6 +24,9 @@ export interface PhotoItem {
   status: ProcessingStatus;
   data?: PhotoMetadata;
   error?: string;
+  // History for Undo/Redo
+  history?: PhotoMetadata[];
+  historyIndex?: number;
 }
 
 export type ProcessingOptions = {
@@ -31,7 +34,7 @@ export type ProcessingOptions = {
   maxKeywords: number;
 };
 
-export const CATEGORIES = [
+export const INITIAL_CATEGORIES = [
   'Backgrounds',
   'Textures',
   'Patterns',

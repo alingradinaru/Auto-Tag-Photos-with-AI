@@ -1,37 +1,48 @@
-import React, { useState, useCallback, useEffect } from 'react';
-import { Plus, Download, Trash2, Zap, Loader2, Package, Settings2, X } from 'lucide-react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { Plus, Download, Zap, Loader2, Package, X, MessageSquare, Maximize2, FileText, ChevronDown } from 'lucide-react';
 
 import Navbar from './components/Navbar';
 import UploadZone from './components/UploadZone';
 import PhotoCard from './components/PhotoCard';
-import { PhotoItem, ProcessingStatus, PhotoMetadata } from './types';
+import { PhotoItem, ProcessingStatus, PhotoMetadata, INITIAL_CATEGORIES } from './types';
 import { generateImageMetadata, fileToBase64 } from './services/geminiService';
-import { createZipWithMetadata, processAndDownloadSingleImage, upscaleImage } from './services/imageService';
+import { createZipWithMetadata, processAndDownloadSingleImage, upscaleImage, constructFileName } from './services/imageService';
+
+const MAX_FILE_SIZE_BYTES = 40 * 1024 * 1024; // 40MB
+const MAX_BATCH_SIZE = 50; // Max photos allowed
 
 const App: React.FC = () => {
   const [photos, setPhotos] = useState<PhotoItem[]>([]);
   const [isGlobalProcessing, setIsGlobalProcessing] = useState(false);
   const [isZipping, setIsZipping] = useState(false);
+  const [showUpscaleAllModal, setShowUpscaleAllModal] = useState(false);
+  const [upscaleAllScale, setUpscaleAllScale] = useState<number>(2);
+  const [isUpscalingAll, setIsUpscalingAll] = useState(false);
+  const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+  const [feedbackText, setFeedbackText] = useState('');
+  const [showDownloadMenu, setShowDownloadMenu] = useState(false);
   
-  // Initialize state from localStorage if available
+  // Dynamic Categories State
+  const [categories, setCategories] = useState<string[]>(INITIAL_CATEGORIES);
+  
+  // Settings State
   const [keepOriginalFilenames, setKeepOriginalFilenames] = useState(() => {
     if (typeof window !== 'undefined') {
-      return localStorage.getItem('instatag_keep_filenames') === 'true';
+      return localStorage.getItem('photagg_keep_filenames') === 'true';
     }
     return false;
   });
 
-  // Dark mode state
   const [isDarkMode, setIsDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
-      return localStorage.getItem('instatag_dark_mode') === 'true';
+      return localStorage.getItem('photagg_dark_mode') === 'true';
     }
     return false;
   });
 
-  // Persist preference to localStorage
+  // Persist preferences
   useEffect(() => {
-    localStorage.setItem('instatag_keep_filenames', String(keepOriginalFilenames));
+    localStorage.setItem('photagg_keep_filenames', String(keepOriginalFilenames));
   }, [keepOriginalFilenames]);
 
   // Handle Dark Mode Effect
@@ -41,7 +52,7 @@ const App: React.FC = () => {
     } else {
       document.documentElement.classList.remove('dark');
     }
-    localStorage.setItem('instatag_dark_mode', String(isDarkMode));
+    localStorage.setItem('photagg_dark_mode', String(isDarkMode));
   }, [isDarkMode]);
 
   const toggleDarkMode = () => setIsDarkMode(!isDarkMode);
@@ -58,6 +69,8 @@ const App: React.FC = () => {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [photos.length]);
 
+  const processingCount = photos.filter(p => p.status === ProcessingStatus.PROCESSING).length;
+  
   // Helper to generate simple ID
   const generateId = () => Math.random().toString(36).substring(2, 9);
 
@@ -74,12 +87,14 @@ const App: React.FC = () => {
       // Call Gemini API
       const metadata = await generateImageMetadata(base64, file.type);
 
-      // Update state with result
+      // Update state with result and initialize history
       setPhotos(prev => prev.map(p => 
         p.id === photoId ? { 
           ...p, 
           status: ProcessingStatus.COMPLETED, 
-          data: metadata 
+          data: metadata,
+          history: [metadata],
+          historyIndex: 0
         } : p
       ));
     } catch (error: any) {
@@ -92,6 +107,30 @@ const App: React.FC = () => {
         } : p
       ));
     }
+  };
+
+  const validateFiles = (files: File[], currentCount: number): File[] => {
+    if (currentCount + files.length > MAX_BATCH_SIZE) {
+      alert(`Limit exceeded. You can only upload up to ${MAX_BATCH_SIZE} photos in a batch.`);
+      return [];
+    }
+
+    const validFiles: File[] = [];
+    let oversizedCount = 0;
+
+    files.forEach(file => {
+      if (file.size <= MAX_FILE_SIZE_BYTES) {
+        validFiles.push(file);
+      } else {
+        oversizedCount++;
+      }
+    });
+
+    if (oversizedCount > 0) {
+      alert(`${oversizedCount} file(s) were skipped because they exceed the 40MB limit.`);
+    }
+
+    return validFiles;
   };
 
   const handleFilesSelected = useCallback(async (files: File[]) => {
@@ -111,6 +150,19 @@ const App: React.FC = () => {
 
   }, []);
 
+  const handleAddPhotosInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const rawFiles = Array.from(e.target.files) as File[];
+      const validFiles = validateFiles(rawFiles, photos.length);
+      
+      if (validFiles.length > 0) {
+        handleFilesSelected(validFiles);
+      }
+    }
+    // Reset input
+    e.target.value = '';
+  };
+
   const handleRemovePhoto = (id: string) => {
     setPhotos(prev => {
       const photoToRemove = prev.find(p => p.id === id);
@@ -128,36 +180,82 @@ const App: React.FC = () => {
     }
   };
 
+  // Undo/Redo logic
   const handleUpdatePhoto = (id: string, updates: Partial<PhotoMetadata>) => {
     setPhotos(prev => prev.map(p => {
       if (p.id === id && p.data) {
-        return { ...p, data: { ...p.data, ...updates } };
+        const newData = { ...p.data, ...updates };
+        const currentHistory = p.history || [p.data];
+        const currentIndex = p.historyIndex ?? 0;
+        
+        // Truncate future history if we are in the middle and making a new change
+        const newHistory = currentHistory.slice(0, currentIndex + 1);
+        newHistory.push(newData);
+        
+        return { 
+          ...p, 
+          data: newData,
+          history: newHistory,
+          historyIndex: newHistory.length - 1
+        };
       }
       return p;
     }));
   };
 
+  const handleUndo = (id: string) => {
+    setPhotos(prev => prev.map(p => {
+      if (p.id === id && p.history && p.historyIndex !== undefined && p.historyIndex > 0) {
+        const newIndex = p.historyIndex - 1;
+        return {
+          ...p,
+          data: p.history[newIndex],
+          historyIndex: newIndex
+        };
+      }
+      return p;
+    }));
+  };
+
+  const handleRedo = (id: string) => {
+    setPhotos(prev => prev.map(p => {
+      if (p.id === id && p.history && p.historyIndex !== undefined && p.historyIndex < p.history.length - 1) {
+        const newIndex = p.historyIndex + 1;
+        return {
+          ...p,
+          data: p.history[newIndex],
+          historyIndex: newIndex
+        };
+      }
+      return p;
+    }));
+  };
+
+  const handleAddCategory = (newCategory: string) => {
+    if (!categories.includes(newCategory)) {
+      setCategories(prev => [...prev, newCategory]);
+    }
+  };
+
+  const handleRemoveCategory = (categoryToRemove: string) => {
+    setCategories(prev => prev.filter(c => c !== categoryToRemove));
+  };
+
   const handleUpscalePhoto = async (id: string, scale: number, customWidth?: number) => {
     const photo = photos.find(p => p.id === id);
-    if (!photo) return;
+    if (!photo) return false;
 
     try {
-      // Temporarily set to processing to show spinner or similar if needed, 
-      // but strictly we might just want to show a toast. For now, let's keep it simple.
-      // We will rely on the PhotoCard to show loading state if we wanted, 
-      // but here we are just swapping the file.
-      
       const newFile = await upscaleImage(photo.file, scale, customWidth);
       const newPreviewUrl = URL.createObjectURL(newFile);
 
-      // Revoke old URL to avoid memory leaks
       URL.revokeObjectURL(photo.previewUrl);
 
       setPhotos(prev => prev.map(p => 
         p.id === id ? { ...p, file: newFile, previewUrl: newPreviewUrl } : p
       ));
       
-      return true; // Success
+      return true;
     } catch (error) {
       console.error("Upscale failed", error);
       alert("Failed to upscale image.");
@@ -165,19 +263,20 @@ const App: React.FC = () => {
     }
   };
 
-  const clearAll = useCallback(() => {
+  const handleUpscaleAll = async () => {
     if (photos.length === 0) return;
     
-    // We use a timeout to ensure the UI doesn't block immediately if there's a rendering backlog
-    setTimeout(() => {
-      if (window.confirm("Are you sure you want to delete all uploaded photos? This action cannot be undone.")) {
-        photos.forEach(p => {
-          if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);
-        });
-        setPhotos([]);
+    setIsUpscalingAll(true);
+    // Process strictly sequentially to avoid browser hanging
+    for (const photo of photos) {
+      if (photo.status === ProcessingStatus.COMPLETED) {
+        await handleUpscalePhoto(photo.id, upscaleAllScale);
       }
-    }, 10);
-  }, [photos]);
+    }
+    
+    setIsUpscalingAll(false);
+    setShowUpscaleAllModal(false);
+  };
 
   const handleDownloadSingle = async (id: string) => {
     const photo = photos.find(p => p.id === id);
@@ -199,8 +298,9 @@ const App: React.FC = () => {
     const csvContent = [
       headers.join(','),
       ...completedPhotos.map(p => {
+        const finalFilename = constructFileName(p, keepOriginalFilenames);
         const row = [
-          `"${p.file.name}"`,
+          `"${finalFilename}"`,
           `"${p.data?.title?.replace(/"/g, '""') || ''}"`,
           `"${p.data?.description?.replace(/"/g, '""') || ''}"`,
           `"${p.data?.category?.replace(/"/g, '""') || ''}"`,
@@ -215,12 +315,13 @@ const App: React.FC = () => {
     if (link.download !== undefined) {
       const url = URL.createObjectURL(blob);
       link.setAttribute('href', url);
-      link.setAttribute('download', `instatag_export_${new Date().toISOString().slice(0, 10)}.csv`);
+      link.setAttribute('download', `photagg_export_${new Date().toISOString().slice(0, 10)}.csv`);
       link.style.visibility = 'hidden';
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
     }
+    setShowDownloadMenu(false);
   };
 
   const downloadAllImages = async () => {
@@ -233,7 +334,7 @@ const App: React.FC = () => {
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `instatag_photos_${new Date().toISOString().slice(0, 10)}.zip`;
+      link.download = `photagg_photos_${new Date().toISOString().slice(0, 10)}.zip`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -243,16 +344,24 @@ const App: React.FC = () => {
       alert("Failed to create zip file. See console for details.");
     } finally {
       setIsZipping(false);
+      setShowDownloadMenu(false);
     }
   };
 
-  const processingCount = photos.filter(p => p.status === ProcessingStatus.PROCESSING).length;
+  const handleFeedbackSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const mailtoLink = `mailto:studio27ideas@gmail.com?subject=Photagg AI Feedback&body=${encodeURIComponent(feedbackText)}`;
+    window.location.href = mailtoLink;
+    setShowFeedbackModal(false);
+    setFeedbackText('');
+  };
+
   const completedCount = photos.filter(p => p.status === ProcessingStatus.COMPLETED).length;
   const isAnyProcessing = processingCount > 0;
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 dark:bg-slate-950 transition-colors duration-300">
-      <Navbar isDarkMode={isDarkMode} toggleDarkMode={toggleDarkMode} />
+      <Navbar isDarkMode={isDarkMode} toggleDarkMode={toggleDarkMode} onFeedbackClick={() => setShowFeedbackModal(true)} />
       
       <main className="flex-grow container mx-auto px-4 sm:px-6 lg:px-8 py-8">
         
@@ -274,7 +383,7 @@ const App: React.FC = () => {
           <div className="flex flex-col xl:flex-row justify-between items-center mb-6 gap-4 bg-white dark:bg-slate-900 p-4 rounded-xl shadow-sm border border-slate-200 dark:border-slate-800 sticky top-20 z-40 transition-colors">
             <div className="flex items-center gap-3 w-full xl:w-auto">
               <div className="bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 px-3 py-1 rounded-full text-sm font-semibold whitespace-nowrap">
-                {photos.length} Photos
+                {photos.length} / {MAX_BATCH_SIZE} Photos
               </div>
               {isAnyProcessing && (
                  <span className="text-sm text-slate-500 dark:text-slate-400 flex items-center gap-2 whitespace-nowrap">
@@ -285,46 +394,62 @@ const App: React.FC = () => {
             </div>
             
             <div className="flex flex-wrap items-center gap-3 justify-end w-full xl:w-auto">
-              {/* Settings Toggle */}
-              <label className="flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-slate-300 mr-2 cursor-pointer select-none hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors bg-slate-50 dark:bg-slate-800 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-indigo-300 dark:hover:border-indigo-500">
+              
+              {/* Filename Toggle */}
+              <label className="flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-slate-300 cursor-pointer select-none bg-slate-50 dark:bg-slate-800 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-indigo-300 dark:hover:border-indigo-500 transition-colors">
                 <input 
                   type="checkbox" 
                   checked={keepOriginalFilenames}
                   onChange={(e) => setKeepOriginalFilenames(e.target.checked)}
                   className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-indigo-600 focus:ring-indigo-500 cursor-pointer bg-white dark:bg-slate-900"
                 />
-                Use original filenames
+                Keep filenames
               </label>
 
               <button 
                 type="button"
-                onClick={clearAll}
-                className="bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-red-50 dark:hover:bg-red-900/20 hover:text-red-600 dark:hover:text-red-400 hover:border-red-200 dark:hover:border-red-800 px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 shadow-sm"
-                title="Delete all uploaded photos"
+                onClick={() => setShowUpscaleAllModal(true)}
+                disabled={completedCount === 0 || isUpscalingAll}
+                className="bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 hover:border-indigo-200 dark:hover:border-indigo-800 px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
               >
-                <Trash2 className="w-4 h-4" />
-                <span className="hidden sm:inline">Delete All</span>
-              </button>
-              
-              <button 
-                type="button"
-                onClick={exportToCSV}
-                disabled={completedCount === 0 || isZipping}
-                className="bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 px-4 py-2 rounded-lg text-sm font-medium hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
-              >
-                <Download className="w-4 h-4" />
-                CSV
+                <Maximize2 className="w-4 h-4" />
+                <span className="hidden sm:inline">Upscale All</span>
               </button>
 
-              <button 
-                type="button"
-                onClick={downloadAllImages}
-                disabled={completedCount === 0 || isZipping}
-                className="bg-indigo-600 hover:bg-indigo-700 dark:bg-indigo-600 dark:hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm shadow-indigo-200 dark:shadow-indigo-900/20 active:transform active:scale-95"
-              >
-                {isZipping ? <Loader2 className="w-4 h-4 animate-spin" /> : <Package className="w-4 h-4" />}
-                Download All
-              </button>
+              {/* Download Dropdown */}
+              <div className="relative">
+                <button
+                  onClick={() => setShowDownloadMenu(!showDownloadMenu)}
+                  disabled={completedCount === 0 || isZipping}
+                  className="bg-indigo-600 hover:bg-indigo-700 dark:bg-indigo-600 dark:hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm shadow-indigo-200 dark:shadow-indigo-900/20 active:transform active:scale-95"
+                >
+                  {isZipping ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                  Download
+                  <ChevronDown className="w-3 h-3 ml-1" />
+                </button>
+                
+                {showDownloadMenu && (
+                  <>
+                  <div className="fixed inset-0 z-10" onClick={() => setShowDownloadMenu(false)}></div>
+                  <div className="absolute right-0 mt-2 w-48 bg-white dark:bg-slate-800 rounded-lg shadow-xl border border-slate-200 dark:border-slate-700 z-20 overflow-hidden animate-in fade-in zoom-in-95 duration-100">
+                    <button 
+                      onClick={downloadAllImages}
+                      className="w-full text-left px-4 py-3 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 flex items-center gap-2"
+                    >
+                      <Package className="w-4 h-4 text-indigo-500" />
+                      Download All (ZIP)
+                    </button>
+                    <button 
+                      onClick={exportToCSV}
+                      className="w-full text-left px-4 py-3 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 flex items-center gap-2 border-t border-slate-100 dark:border-slate-700"
+                    >
+                      <FileText className="w-4 h-4 text-green-500" />
+                      Export CSV
+                    </button>
+                  </div>
+                  </>
+                )}
+              </div>
               
               <label className="bg-slate-900 dark:bg-white text-white dark:text-slate-900 px-4 py-2 rounded-lg text-sm font-medium hover:bg-slate-800 dark:hover:bg-slate-100 transition-colors flex items-center gap-2 cursor-pointer shadow-sm hover:shadow active:scale-95 whitespace-nowrap">
                 <Plus className="w-4 h-4" />
@@ -334,12 +459,7 @@ const App: React.FC = () => {
                   className="hidden" 
                   multiple 
                   accept="image/*"
-                  onChange={(e) => {
-                     if (e.target.files && e.target.files.length > 0) {
-                        const files = Array.from(e.target.files);
-                        handleFilesSelected(files);
-                     }
-                  }} 
+                  onChange={handleAddPhotosInput}
                 />
               </label>
             </div>
@@ -349,7 +469,11 @@ const App: React.FC = () => {
         {/* Upload Zone (conditionally smaller if photos exist) */}
         {photos.length === 0 ? (
           <div className="max-w-2xl mx-auto">
-            <UploadZone onFilesSelected={handleFilesSelected} isProcessing={isGlobalProcessing} />
+            <UploadZone 
+              onFilesSelected={handleFilesSelected} 
+              isProcessing={isGlobalProcessing} 
+              currentFileCount={photos.length}
+            />
             
             {/* Feature Grid for Empty State */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mt-16">
@@ -381,6 +505,13 @@ const App: React.FC = () => {
                 onDownload={handleDownloadSingle}
                 onUpdate={handleUpdatePhoto}
                 onUpscale={handleUpscalePhoto}
+                onUndo={handleUndo}
+                onRedo={handleRedo}
+                canUndo={photo.history && photo.historyIndex !== undefined ? photo.historyIndex > 0 : false}
+                canRedo={photo.history && photo.historyIndex !== undefined ? photo.historyIndex < photo.history.length - 1 : false}
+                categories={categories}
+                onAddCategory={handleAddCategory}
+                onRemoveCategory={handleRemoveCategory}
               />
             ))}
           </div>
@@ -390,9 +521,108 @@ const App: React.FC = () => {
       
       <footer className="bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 py-8 mt-auto transition-colors">
         <div className="max-w-7xl mx-auto px-4 text-center text-slate-500 dark:text-slate-400 text-sm">
-          <p>© {new Date().getFullYear()} InstaTag AI. Powered by Google Gemini.</p>
+          <p>© {new Date().getFullYear()} Photagg AI. Powered by Google Gemini.</p>
         </div>
       </footer>
+
+      {/* Upscale All Modal */}
+      {showUpscaleAllModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white dark:bg-slate-900 rounded-xl shadow-xl max-w-sm w-full p-6 border border-slate-200 dark:border-slate-800 animate-in fade-in zoom-in-95 duration-200">
+            {isUpscalingAll ? (
+              <div className="text-center py-6">
+                 <Loader2 className="w-10 h-10 text-indigo-600 animate-spin mx-auto mb-4" />
+                 <h3 className="text-lg font-semibold text-slate-900 dark:text-white">Upscaling Images...</h3>
+                 <p className="text-sm text-slate-500 dark:text-slate-400 mt-2">Please wait while we process all images.</p>
+              </div>
+            ) : (
+              <>
+                <h3 className="text-lg font-semibold text-slate-900 dark:text-white mb-4">Upscale All Images</h3>
+                <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">
+                   Choose a scale factor. This will resize all {photos.length} images.
+                </p>
+                
+                <div className="grid grid-cols-2 gap-3 mb-6">
+                   <button 
+                     onClick={() => setUpscaleAllScale(2)}
+                     className={`py-2 px-4 rounded-lg border text-sm font-medium transition-colors ${upscaleAllScale === 2 ? 'border-indigo-600 bg-indigo-50 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400 dark:border-indigo-500' : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300'}`}
+                   >
+                      2x Scale
+                   </button>
+                   <button 
+                     onClick={() => setUpscaleAllScale(4)}
+                     className={`py-2 px-4 rounded-lg border text-sm font-medium transition-colors ${upscaleAllScale === 4 ? 'border-indigo-600 bg-indigo-50 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400 dark:border-indigo-500' : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300'}`}
+                   >
+                      4x Scale
+                   </button>
+                </div>
+
+                <div className="flex gap-3">
+                  <button 
+                    onClick={() => setShowUpscaleAllModal(false)}
+                    className="flex-1 py-2 px-4 rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 text-sm font-medium hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    onClick={handleUpscaleAll}
+                    className="flex-1 py-2 px-4 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 transition-colors"
+                  >
+                    Start Upscaling
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Feedback Modal */}
+      {showFeedbackModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+           <div className="bg-white dark:bg-slate-900 rounded-xl shadow-xl max-w-md w-full p-6 border border-slate-200 dark:border-slate-800 animate-in fade-in zoom-in-95 duration-200 relative">
+              <button 
+                onClick={() => setShowFeedbackModal(false)}
+                className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+              >
+                <X className="w-5 h-5" />
+              </button>
+              
+              <h3 className="text-lg font-semibold text-slate-900 dark:text-white mb-2">Send Feedback</h3>
+              <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">
+                Found a bug? Have a suggestion? This will open your email client.
+                <br/>
+                <span className="text-indigo-600 dark:text-indigo-400 block mt-1">studio27ideas@gmail.com</span>
+              </p>
+              <form onSubmit={handleFeedbackSubmit}>
+                <textarea 
+                    required
+                    className="w-full h-32 p-3 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none text-slate-900 dark:text-white resize-none mb-4 text-sm"
+                    placeholder="Tell us what you think..."
+                    value={feedbackText}
+                    onChange={(e) => setFeedbackText(e.target.value)}
+                ></textarea>
+                <div className="flex justify-end gap-3">
+                    <button 
+                        type="button"
+                        onClick={() => setShowFeedbackModal(false)}
+                        className="px-4 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                    >
+                        Cancel
+                    </button>
+                    <button 
+                        type="submit"
+                        className="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 transition-colors flex items-center gap-2"
+                    >
+                        <MessageSquare className="w-4 h-4" />
+                        Send Email
+                    </button>
+                </div>
+              </form>
+           </div>
+        </div>
+      )}
+
     </div>
   );
 };

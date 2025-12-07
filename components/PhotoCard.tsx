@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
-import { Copy, Trash2, RefreshCw, Check, Loader2, Tag, Download, Layers, AlertTriangle, CheckCircle, Plus, X, ChevronDown, Maximize2 } from 'lucide-react';
+import { Copy, Trash2, RefreshCw, Check, Loader2, Tag, Download, Layers, AlertTriangle, CheckCircle, Plus, X, ChevronDown, Maximize2, Undo, Redo, ChevronUp } from 'lucide-react';
 import { PhotoItem, ProcessingStatus, PhotoMetadata } from '../types';
-import { CATEGORIES } from '../types';
 
 interface PhotoCardProps {
   item: PhotoItem;
@@ -10,14 +9,38 @@ interface PhotoCardProps {
   onDownload: (id: string) => void;
   onUpdate?: (id: string, updates: Partial<PhotoMetadata>) => void;
   onUpscale?: (id: string, scale: number, customWidth?: number) => Promise<boolean>;
+  onUndo?: (id: string) => void;
+  onRedo?: (id: string) => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  categories?: string[];
+  onAddCategory?: (category: string) => void;
+  onRemoveCategory?: (category: string) => void;
 }
 
-const PhotoCard: React.FC<PhotoCardProps> = ({ item, onRemove, onRetry, onDownload, onUpdate, onUpscale }) => {
+const PhotoCard: React.FC<PhotoCardProps> = ({ 
+  item, 
+  onRemove, 
+  onRetry, 
+  onDownload, 
+  onUpdate, 
+  onUpscale,
+  onUndo,
+  onRedo,
+  canUndo,
+  canRedo,
+  categories,
+  onAddCategory,
+  onRemoveCategory
+}) => {
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [newKeyword, setNewKeyword] = useState('');
   const [showUpscaleMenu, setShowUpscaleMenu] = useState(false);
   const [isUpscaling, setIsUpscaling] = useState(false);
   const [customWidth, setCustomWidth] = useState('');
+  const [showAllIssues, setShowAllIssues] = useState(false);
+  const [isAddingCategory, setIsAddingCategory] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState('');
 
   const copyToClipboard = (text: string, field: string) => {
     navigator.clipboard.writeText(text);
@@ -34,10 +57,21 @@ const PhotoCard: React.FC<PhotoCardProps> = ({ item, onRemove, onRetry, onDownlo
   const handleAddKeyword = (e: React.FormEvent) => {
     e.preventDefault();
     if (newKeyword.trim() && item.data && onUpdate) {
-      onUpdate(item.id, {
-        keywords: [...item.data.keywords, newKeyword.trim()]
-      });
-      setNewKeyword('');
+      const keywordToAdd = newKeyword.trim();
+      // Check for duplicates
+      if (!item.data.keywords.includes(keywordToAdd)) {
+        onUpdate(item.id, {
+          keywords: [...item.data.keywords, keywordToAdd]
+        });
+        setNewKeyword('');
+      } else {
+        // Optional: User feedback for duplicate
+        const input = document.getElementById(`keyword-input-${item.id}`);
+        if(input) {
+          input.classList.add('animate-shake');
+          setTimeout(() => input.classList.remove('animate-shake'), 500);
+        }
+      }
     }
   };
 
@@ -58,6 +92,24 @@ const PhotoCard: React.FC<PhotoCardProps> = ({ item, onRemove, onRetry, onDownlo
     }
   };
 
+  const handleAddNewCategory = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newCategoryName.trim() && onAddCategory && onUpdate) {
+      onAddCategory(newCategoryName.trim());
+      onUpdate(item.id, { category: newCategoryName.trim() });
+      setNewCategoryName('');
+      setIsAddingCategory(false);
+    }
+  };
+
+  const handleDeleteCategory = (e: React.MouseEvent) => {
+     e.preventDefault();
+     e.stopPropagation();
+     if (item.data && onRemoveCategory && confirm(`Delete "${item.data.category}" from global category list?`)) {
+        onRemoveCategory(item.data.category);
+     }
+  };
+
   const isLoading = item.status === ProcessingStatus.PROCESSING || item.status === ProcessingStatus.UPLOADING;
 
   const getScoreColor = (score: number) => {
@@ -68,6 +120,16 @@ const PhotoCard: React.FC<PhotoCardProps> = ({ item, onRemove, onRetry, onDownlo
 
   return (
     <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden flex flex-col md:flex-row h-auto md:h-auto lg:h-[30rem] transition-all hover:shadow-md hover:border-indigo-300 dark:hover:border-indigo-700">
+      <style>{`
+        @keyframes shake {
+          0%, 100% { transform: translateX(0); }
+          25% { transform: translateX(-2px); }
+          75% { transform: translateX(2px); }
+        }
+        .animate-shake {
+          animation: shake 0.2s ease-in-out;
+        }
+      `}</style>
       {/* Image Preview Section */}
       <div className="w-full md:w-72 lg:w-80 h-64 md:h-full relative shrink-0 bg-slate-100 dark:bg-slate-800 flex flex-col group">
         <div className="relative flex-grow overflow-hidden">
@@ -87,6 +149,7 @@ const PhotoCard: React.FC<PhotoCardProps> = ({ item, onRemove, onRetry, onDownlo
               {item.status === ProcessingStatus.COMPLETED && (
                 <>
                   <button 
+                    type="button"
                     onClick={() => setShowUpscaleMenu(!showUpscaleMenu)}
                     className={`p-1.5 rounded-full shadow-sm backdrop-blur-sm transition-colors ${showUpscaleMenu ? 'bg-indigo-600 text-white' : 'bg-white/90 dark:bg-slate-800/90 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-slate-700'}`}
                     title="Upscale Image"
@@ -94,6 +157,7 @@ const PhotoCard: React.FC<PhotoCardProps> = ({ item, onRemove, onRetry, onDownlo
                     <Maximize2 className="w-4 h-4" />
                   </button>
                   <button 
+                    type="button"
                     onClick={() => onDownload(item.id)}
                     className="p-1.5 bg-white/90 dark:bg-slate-800/90 text-indigo-600 dark:text-indigo-400 rounded-full hover:bg-indigo-50 dark:hover:bg-slate-700 transition-colors shadow-sm backdrop-blur-sm"
                     title="Download with Metadata"
@@ -103,6 +167,7 @@ const PhotoCard: React.FC<PhotoCardProps> = ({ item, onRemove, onRetry, onDownlo
                 </>
               )}
               <button 
+                type="button"
                 onClick={() => onRemove(item.id)}
                 className="p-1.5 bg-white/90 dark:bg-slate-800/90 text-red-500 dark:text-red-400 rounded-full hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors shadow-sm backdrop-blur-sm"
                 title="Remove image"
@@ -144,6 +209,7 @@ const PhotoCard: React.FC<PhotoCardProps> = ({ item, onRemove, onRetry, onDownlo
                              className="w-full text-xs px-2 py-1 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-600 rounded focus:border-indigo-500 outline-none dark:text-white"
                           />
                           <button 
+                             type="button"
                              disabled={!customWidth} 
                              onClick={() => handleUpscale(1, parseInt(customWidth))}
                              className="bg-slate-100 dark:bg-slate-700 px-2 rounded hover:bg-indigo-50 text-slate-600 dark:text-slate-300 disabled:opacity-50"
@@ -152,7 +218,7 @@ const PhotoCard: React.FC<PhotoCardProps> = ({ item, onRemove, onRetry, onDownlo
                           </button>
                        </div>
                     </div>
-                    <button onClick={() => setShowUpscaleMenu(false)} className="w-full text-[10px] text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 mt-1">Cancel</button>
+                    <button type="button" onClick={() => setShowUpscaleMenu(false)} className="w-full text-[10px] text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 mt-1">Cancel</button>
                    </>
                  )}
               </div>
@@ -160,20 +226,66 @@ const PhotoCard: React.FC<PhotoCardProps> = ({ item, onRemove, onRetry, onDownlo
 
             {/* Category Dropdown (Editable Badge) */}
             {item.data && onUpdate && !showUpscaleMenu && (
-              <div className="absolute bottom-2 left-2 right-2">
-                <div className="relative inline-block max-w-full">
-                    <select
-                        value={item.data.category}
-                        onChange={(e) => onUpdate(item.id, { category: e.target.value })}
-                        className="appearance-none w-full pl-8 pr-8 py-1.5 bg-black/60 backdrop-blur-md text-white text-[10px] font-semibold uppercase tracking-wider rounded-md outline-none cursor-pointer hover:bg-black/70 transition-colors border border-transparent focus:border-white/30 truncate"
-                    >
-                        {CATEGORIES.map(cat => (
-                            <option key={cat} value={cat} className="text-slate-900 bg-white">{cat}</option>
-                        ))}
-                    </select>
-                    <Layers className="w-3 h-3 text-white absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                    <ChevronDown className="w-3 h-3 text-white/70 absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
-                </div>
+              <div className="absolute bottom-2 left-2 right-2 flex gap-1 items-stretch">
+                {isAddingCategory ? (
+                   <form onSubmit={handleAddNewCategory} className="flex-1 flex gap-1">
+                      <input 
+                        type="text" 
+                        value={newCategoryName} 
+                        onChange={(e) => setNewCategoryName(e.target.value)}
+                        placeholder="New Category"
+                        autoFocus
+                        className="w-full bg-black/80 backdrop-blur-md text-white text-[10px] px-2 py-1.5 rounded outline-none border border-white/30"
+                      />
+                      <button type="button" onClick={() => setIsAddingCategory(false)} className="bg-black/60 text-white p-1.5 rounded hover:bg-black/80">
+                         <X className="w-3 h-3" />
+                      </button>
+                      <button type="submit" disabled={!newCategoryName.trim()} className="bg-indigo-600 text-white p-1.5 rounded hover:bg-indigo-700">
+                         <Check className="w-3 h-3" />
+                      </button>
+                   </form>
+                ) : (
+                  <>
+                    <div className="relative inline-block flex-1 min-w-0">
+                        <select
+                            value={item.data.category}
+                            onChange={(e) => onUpdate(item.id, { category: e.target.value })}
+                            className="appearance-none w-full pl-8 pr-8 py-1.5 bg-black/60 backdrop-blur-md text-white text-[10px] font-semibold uppercase tracking-wider rounded-md outline-none cursor-pointer hover:bg-black/70 transition-colors border border-transparent focus:border-white/30 truncate"
+                        >
+                            {/* Render dynamic categories */}
+                            {categories?.map(cat => (
+                                <option key={cat} value={cat} className="text-slate-900 bg-white">{cat}</option>
+                            ))}
+                            {/* Ensure current category is selectable even if removed from global list */}
+                            {categories && !categories.includes(item.data.category) && (
+                                <option value={item.data.category} className="text-slate-900 bg-white">{item.data.category}</option>
+                            )}
+                        </select>
+                        <Layers className="w-3 h-3 text-white absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <ChevronDown className="w-3 h-3 text-white/70 absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    </div>
+                    {onRemoveCategory && (
+                        <button 
+                          type="button"
+                          onClick={handleDeleteCategory}
+                          className="px-2 bg-black/60 backdrop-blur-md text-white hover:bg-red-600 rounded-md transition-colors shrink-0"
+                          title="Remove current category from list"
+                        >
+                           <Trash2 className="w-3 h-3" />
+                        </button>
+                    )}
+                    {onAddCategory && (
+                      <button 
+                        type="button"
+                        onClick={() => setIsAddingCategory(true)}
+                        className="px-2 bg-black/60 backdrop-blur-md text-white hover:bg-indigo-600 rounded-md transition-colors shrink-0"
+                        title="Add new category"
+                      >
+                         <Plus className="w-3 h-3" />
+                      </button>
+                    )}
+                  </>
+                )}
               </div>
             )}
         </div>
@@ -192,14 +304,24 @@ const PhotoCard: React.FC<PhotoCardProps> = ({ item, onRemove, onRetry, onDownlo
             
             {item.data.qualityAnalysis.issues.length > 0 ? (
                 <div className="space-y-1">
-                    {item.data.qualityAnalysis.issues.slice(0, 2).map((issue, idx) => (
+                    {(showAllIssues ? item.data.qualityAnalysis.issues : item.data.qualityAnalysis.issues.slice(0, 2)).map((issue, idx) => (
                         <div key={idx} className="flex items-start gap-1.5 text-xs text-amber-600 dark:text-amber-500">
                              <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />
-                             <span className="leading-tight line-clamp-1" title={issue}>{issue}</span>
+                             <span className="leading-tight" title={issue}>{issue}</span>
                         </div>
                     ))}
                     {item.data.qualityAnalysis.issues.length > 2 && (
-                         <p className="text-[10px] text-slate-400 dark:text-slate-500 pl-4.5">+{item.data.qualityAnalysis.issues.length - 2} more issues</p>
+                       <button 
+                         type="button"
+                         onClick={() => setShowAllIssues(!showAllIssues)}
+                         className="flex items-center gap-1 text-[10px] font-medium text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 dark:hover:text-indigo-300 ml-4.5 mt-1"
+                       >
+                         {showAllIssues ? (
+                           <><ChevronUp className="w-3 h-3" /> Show Less</>
+                         ) : (
+                           <><ChevronDown className="w-3 h-3" /> Show {item.data.qualityAnalysis.issues.length - 2} more issues</>
+                         )}
+                       </button>
                     )}
                 </div>
             ) : (
@@ -222,6 +344,7 @@ const PhotoCard: React.FC<PhotoCardProps> = ({ item, onRemove, onRetry, onDownlo
             <p className="text-red-600 dark:text-red-400 font-medium mb-2">Generation Failed</p>
             <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">{item.error || "Unknown error occurred"}</p>
             <button 
+              type="button"
               onClick={() => onRetry(item.id)}
               className="text-sm bg-slate-900 dark:bg-white text-white dark:text-slate-900 px-4 py-2 rounded-lg hover:bg-slate-800 dark:hover:bg-slate-100 transition-colors"
             >
@@ -235,11 +358,40 @@ const PhotoCard: React.FC<PhotoCardProps> = ({ item, onRemove, onRetry, onDownlo
           </div>
         ) : item.data && onUpdate ? (
           <>
+            {/* Toolbar for Content */}
+            <div className="flex items-center justify-between mb-2">
+               <div className="flex items-center gap-2">
+                 {(onUndo && canUndo !== undefined) && (
+                   <div className="flex bg-slate-100 dark:bg-slate-800 rounded-lg p-0.5">
+                      <button 
+                        type="button"
+                        onClick={() => onUndo && onUndo(item.id)}
+                        disabled={!canUndo}
+                        className="p-1.5 rounded-md hover:bg-white dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 disabled:opacity-30 disabled:hover:bg-transparent transition-all"
+                        title="Undo"
+                      >
+                        <Undo className="w-3.5 h-3.5" />
+                      </button>
+                      <button 
+                        type="button"
+                        onClick={() => onRedo && onRedo(item.id)}
+                        disabled={!canRedo}
+                        className="p-1.5 rounded-md hover:bg-white dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 disabled:opacity-30 disabled:hover:bg-transparent transition-all"
+                        title="Redo"
+                      >
+                        <Redo className="w-3.5 h-3.5" />
+                      </button>
+                   </div>
+                 )}
+               </div>
+            </div>
+
             {/* Title - Editable */}
             <div className="group relative">
               <div className="flex items-center justify-between mb-1">
                 <label className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">Title</label>
                 <button 
+                  type="button"
                   onClick={() => copyToClipboard(item.data!.title, 'title')}
                   className={`p-1 rounded transition-colors ${copiedField === 'title' ? 'text-green-600 bg-green-50 dark:bg-green-900/20 dark:text-green-400' : 'text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 dark:hover:text-indigo-400'}`}
                 >
@@ -259,6 +411,7 @@ const PhotoCard: React.FC<PhotoCardProps> = ({ item, onRemove, onRetry, onDownlo
               <div className="flex items-center justify-between mb-1">
                 <label className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">Description</label>
                 <button 
+                  type="button"
                   onClick={() => copyToClipboard(item.data!.description, 'desc')}
                   className={`p-1 rounded transition-colors ${copiedField === 'desc' ? 'text-green-600 bg-green-50 dark:bg-green-900/20 dark:text-green-400' : 'text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 dark:hover:text-indigo-400'}`}
                 >
@@ -281,6 +434,7 @@ const PhotoCard: React.FC<PhotoCardProps> = ({ item, onRemove, onRetry, onDownlo
                   Keywords <span className="text-indigo-600 dark:text-indigo-400 ml-1 bg-indigo-50 dark:bg-indigo-900/30 px-1.5 rounded-full text-[10px]">{item.data.keywords.length}</span>
                 </label>
                 <button 
+                  type="button"
                   onClick={copyTags}
                   className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium transition-all
                     ${copiedField === 'tags' 
@@ -305,6 +459,7 @@ const PhotoCard: React.FC<PhotoCardProps> = ({ item, onRemove, onRetry, onDownlo
                 <form onSubmit={handleAddKeyword} className="inline-flex">
                    <div className="relative flex items-center">
                         <input 
+                            id={`keyword-input-${item.id}`}
                             type="text" 
                             value={newKeyword}
                             onChange={(e) => setNewKeyword(e.target.value)}
@@ -324,6 +479,7 @@ const PhotoCard: React.FC<PhotoCardProps> = ({ item, onRemove, onRetry, onDownlo
                   >
                     {keyword}
                     <button 
+                        type="button"
                         onClick={() => handleRemoveKeyword(keyword)}
                         className="ml-1 text-slate-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
                     >

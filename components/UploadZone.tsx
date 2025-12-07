@@ -4,11 +4,43 @@ import { UploadCloud, Image as ImageIcon, Loader2 } from 'lucide-react';
 interface UploadZoneProps {
   onFilesSelected: (files: File[]) => void;
   isProcessing: boolean;
+  currentFileCount?: number;
 }
 
-const UploadZone: React.FC<UploadZoneProps> = ({ onFilesSelected, isProcessing }) => {
+const MAX_FILE_SIZE_BYTES = 40 * 1024 * 1024; // 40MB
+const MAX_BATCH_SIZE = 50;
+
+const UploadZone: React.FC<UploadZoneProps> = ({ onFilesSelected, isProcessing, currentFileCount = 0 }) => {
   const [isDragging, setIsDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const validateAndPassFiles = (files: File[]) => {
+    // Check Batch Size
+    if (currentFileCount + files.length > MAX_BATCH_SIZE) {
+      alert(`Limit exceeded. You can only upload up to ${MAX_BATCH_SIZE} photos in total. You currently have ${currentFileCount}.`);
+      return;
+    }
+
+    const validTypes = files.filter(file => file.type.startsWith('image/'));
+    const validSize: File[] = [];
+    let oversizedCount = 0;
+
+    validTypes.forEach(file => {
+      if (file.size <= MAX_FILE_SIZE_BYTES) {
+        validSize.push(file);
+      } else {
+        oversizedCount++;
+      }
+    });
+    
+    if (oversizedCount > 0) {
+      alert(`${oversizedCount} file(s) were skipped because they exceed the 40MB limit.`);
+    }
+
+    if (validSize.length > 0) {
+      onFilesSelected(validSize);
+    }
+  };
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -25,29 +57,19 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onFilesSelected, isProcessing }
     setIsDragging(false);
     
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      const validFiles = Array.from(e.dataTransfer.files).filter((file: File) => 
-        file.type.startsWith('image/')
-      );
-      if (validFiles.length > 0) {
-        onFilesSelected(validFiles);
-      }
+      validateAndPassFiles(Array.from(e.dataTransfer.files));
     }
-  }, [onFilesSelected]);
+  }, [onFilesSelected, currentFileCount]);
 
   const handleFileInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      const validFiles = Array.from(e.target.files).filter((file: File) => 
-        file.type.startsWith('image/')
-      );
-      if (validFiles.length > 0) {
-        onFilesSelected(validFiles);
-      }
+      validateAndPassFiles(Array.from(e.target.files));
     }
     // Reset value to allow selecting the same file again if needed
     if (inputRef.current) {
       inputRef.current.value = '';
     }
-  }, [onFilesSelected]);
+  }, [onFilesSelected, currentFileCount]);
 
   const handleClick = () => {
     inputRef.current?.click();
@@ -102,9 +124,12 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onFilesSelected, isProcessing }
         </div>
 
         {!isProcessing && (
-          <div className="flex items-center gap-2 text-xs font-medium text-slate-400 dark:text-slate-500 uppercase tracking-wider">
-            <ImageIcon className="w-4 h-4" />
-            <span>Up to 10MB per file</span>
+          <div className="flex flex-col items-center gap-1 text-xs font-medium text-slate-400 dark:text-slate-500">
+            <div className="flex items-center gap-2 uppercase tracking-wider">
+               <ImageIcon className="w-4 h-4" />
+               <span>Up to 40MB per file</span>
+            </div>
+            <span>Max {MAX_BATCH_SIZE} photos per batch</span>
           </div>
         )}
       </div>
